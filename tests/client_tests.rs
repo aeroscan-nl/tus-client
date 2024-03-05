@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::Write;
+use std::task::{Poll, Waker};
 use tempfile::NamedTempFile;
 use tus_client;
 use tus_client::http::{HttpHandler, HttpMethod, HttpRequest, HttpResponse};
@@ -27,8 +29,22 @@ impl Default for TestHandler {
     }
 }
 
+fn unwrap_future<F>(fut: F) -> F::Output
+where
+    F: Future,
+{
+    let waker = futures::task::noop_waker();
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut pin = Box::pin(fut);
+    let Poll::Ready(result) = Future::poll(pin.as_mut(), &mut context) else {
+        panic!("Future did not resolve");
+    };
+
+    result
+}
+
 impl HttpHandler for TestHandler {
-    fn handle_request(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
+    async fn handle_request<'a>(&self, req: HttpRequest<'a>) -> Result<HttpResponse, Error> {
         match &req.method {
             HttpMethod::Head => {
                 let mut headers = HashMap::new();
@@ -118,9 +134,7 @@ fn should_report_correct_upload_progress() {
         ..TestHandler::default()
     });
 
-    let info = client
-        .get_info("/something")
-        .expect("'get_progress' call failed");
+    let info = unwrap_future(client.get_info("/something")).expect("'get_progress' call failed");
 
     let metadata = info.metadata.unwrap();
     assert_eq!(1234, info.bytes_uploaded);
@@ -142,7 +156,7 @@ fn should_return_not_found_at_4xx_status() {
         ..TestHandler::default()
     });
 
-    let result = client.get_info("/something");
+    let result = unwrap_future(client.get_info("/something"));
 
     assert!(result.is_err());
     match result {
@@ -160,9 +174,8 @@ fn should_return_server_info() {
         ..TestHandler::default()
     });
 
-    let result = client
-        .get_server_info("/something")
-        .expect("'get_server_info' call failed");
+    let result =
+        unwrap_future(client.get_server_info("/something")).expect("'get_server_info' call failed");
 
     assert_eq!(vec!["1.0.0", "0.2.2"], result.supported_versions);
     assert_eq!(
@@ -183,9 +196,7 @@ fn should_upload_file() {
         ..TestHandler::default()
     });
 
-    client
-        .upload("/something", temp_file.path())
-        .expect("'upload' call failed");
+    unwrap_future(client.upload("/something", temp_file.path())).expect("'upload' call failed");
 }
 
 #[test]
@@ -199,8 +210,7 @@ fn should_upload_file_with_custom_chunk_size() {
         ..TestHandler::default()
     });
 
-    client
-        .upload_with_chunk_size("/something", temp_file.path(), 9 * 87 * 65 * 43)
+    unwrap_future(client.upload_with_chunk_size("/something", temp_file.path(), 9 * 87 * 65 * 43))
         .expect("'upload_with_chunk_size' call failed");
 }
 
@@ -217,8 +227,7 @@ fn should_receive_upload_path() {
     metadata.insert("key_one".to_owned(), "value_one".to_owned());
     metadata.insert("key_two".to_owned(), "value_two".to_owned());
 
-    let result = client
-        .create("/something", temp_file.path())
+    let result = unwrap_future(client.create("/something", temp_file.path()))
         .expect("'create_with_metadata' call failed");
 
     assert!(!result.is_empty());
@@ -237,9 +246,9 @@ fn should_receive_upload_path_with_metadata() {
     metadata.insert("key_one".to_owned(), "value_one".to_owned());
     metadata.insert("key_two".to_owned(), "value_two".to_owned());
 
-    let result = client
-        .create_with_metadata("/something", temp_file.path(), metadata)
-        .expect("'create_with_metadata' call failed");
+    let result =
+        unwrap_future(client.create_with_metadata("/something", temp_file.path(), metadata))
+            .expect("'create_with_metadata' call failed");
 
     assert!(!result.is_empty());
 }
@@ -251,5 +260,5 @@ fn should_receive_204_after_deleting_file() {
         ..TestHandler::default()
     });
 
-    client.delete("/something").expect("'delete' call failed");
+    unwrap_future(client.delete("/something")).expect("'delete' call failed");
 }

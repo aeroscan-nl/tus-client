@@ -29,6 +29,7 @@
 //!
 //! let upload_url = client
 //! .create("https://my.tus.server/files/", "/path/to/file")
+//! .await
 //! .expect("Failed to create file on server");
 //!
 //! // Next, you can start uploading the file by calling `upload`.
@@ -37,6 +38,7 @@
 //!
 //! client
 //! .upload(&upload_url, "/path/to/file")
+//! .await
 //! .expect("Failed to upload file to server");
 //! ```
 //!
@@ -50,7 +52,6 @@ use std::fs::File;
 use std::io;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::num::ParseIntError;
-use std::ops::Deref;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -64,34 +65,37 @@ mod reqwest;
 const DEFAULT_CHUNK_SIZE: usize = 5 * 1024 * 1024;
 
 /// Used to interact with a [tus](https://tus.io) endpoint.
-pub struct Client<'a> {
+pub struct Client<H: HttpHandler> {
     use_method_override: bool,
-    http_handler: Box<dyn HttpHandler + 'a>,
+    http_handler: H,
 }
 
-impl<'a> Client<'a> {
+impl<H> Client<H>
+where
+    H: HttpHandler,
+{
     /// Instantiates a new instance of `Client`. `http_handler` needs to implement the `HttpHandler` trait.
     /// A default implementation of this trait for the `reqwest` library is available by enabling the `reqwest` feature.
-    pub fn new(http_handler: impl HttpHandler + 'a) -> Self {
+    pub fn new(http_handler: H) -> Self {
         Client {
             use_method_override: false,
-            http_handler: Box::new(http_handler),
+            http_handler,
         }
     }
 
     /// Some environments might not support using the HTTP methods `PATCH` and `DELETE`. Use this method to create a `Client` which uses the `X-HTTP-METHOD-OVERRIDE` header to specify these methods instead.
-    pub fn with_method_override(http_handler: impl HttpHandler + 'a) -> Self {
+    pub fn with_method_override(http_handler: H) -> Self {
         Client {
             use_method_override: true,
-            http_handler: Box::new(http_handler),
+            http_handler,
         }
     }
 
     /// Get info about a file on the server.
-    pub fn get_info(&self, url: &str) -> Result<UploadInfo, Error> {
+    pub async fn get_info(&self, url: &str) -> Result<UploadInfo, Error> {
         let req = self.create_request(HttpMethod::Head, url, None, Some(default_headers()));
 
-        let response = self.http_handler.deref().handle_request(req)?;
+        let response = self.http_handler.handle_request(req).await?;
 
         let bytes_uploaded = response.headers.get_by_key(headers::UPLOAD_OFFSET);
         let total_size = response
@@ -132,18 +136,19 @@ impl<'a> Client<'a> {
     }
 
     /// Upload a file to the specified upload URL.
-    pub fn upload(&self, url: &str, path: &Path) -> Result<(), Error> {
+    pub async fn upload(&self, url: &str, path: &Path) -> Result<(), Error> {
         self.upload_with_chunk_size(url, path, DEFAULT_CHUNK_SIZE)
+            .await
     }
 
     /// Upload a file to the specified upload URL with the given chunk size.
-    pub fn upload_with_chunk_size(
+    pub async fn upload_with_chunk_size(
         &self,
         url: &str,
         path: &Path,
         chunk_size: usize,
     ) -> Result<(), Error> {
-        let info = self.get_info(url)?;
+        let info = self.get_info(url).await?;
         let file = File::open(path)?;
         let file_len = file.metadata()?.len();
 
@@ -172,7 +177,7 @@ impl<'a> Client<'a> {
                 Some(create_upload_headers(progress)),
             );
 
-            let response = self.http_handler.deref().handle_request(req)?;
+            let response = self.http_handler.handle_request(req).await?;
 
             if response.status_code == 409 {
                 return Err(Error::WrongUploadOffsetError);
@@ -202,10 +207,10 @@ impl<'a> Client<'a> {
     }
 
     /// Get information about the tus server
-    pub fn get_server_info(&self, url: &str) -> Result<ServerInfo, Error> {
+    pub async fn get_server_info(&self, url: &str) -> Result<ServerInfo, Error> {
         let req = self.create_request(HttpMethod::Options, url, None, None);
 
-        let response = self.http_handler.deref().handle_request(req)?;
+        let response = self.http_handler.handle_request(req).await?;
 
         if ![200_usize, 204].contains(&response.status_code) {
             return Err(Error::UnexpectedStatusCode(response.status_code));
@@ -241,12 +246,12 @@ impl<'a> Client<'a> {
     }
 
     /// Create a file on the server, receiving the upload URL of the file.
-    pub fn create(&self, url: &str, path: &Path) -> Result<String, Error> {
-        self.create_with_metadata(url, path, HashMap::new())
+    pub async fn create(&self, url: &str, path: &Path) -> Result<String, Error> {
+        self.create_with_metadata(url, path, HashMap::new()).await
     }
 
     /// Create a file on the server including the specified metadata, receiving the upload URL of the file.
-    pub fn create_with_metadata(
+    pub async fn create_with_metadata(
         &self,
         url: &str,
         path: &Path,
@@ -268,7 +273,7 @@ impl<'a> Client<'a> {
 
         let req = self.create_request(HttpMethod::Post, url, None, Some(headers));
 
-        let response = self.http_handler.deref().handle_request(req)?;
+        let response = self.http_handler.handle_request(req).await?;
 
         if response.status_code == 413 {
             return Err(Error::FileTooLarge);
@@ -288,10 +293,10 @@ impl<'a> Client<'a> {
     }
 
     /// Delete a file on the server.
-    pub fn delete(&self, url: &str) -> Result<(), Error> {
+    pub async fn delete(&self, url: &str) -> Result<(), Error> {
         let req = self.create_request(HttpMethod::Delete, url, None, Some(default_headers()));
 
-        let response = self.http_handler.deref().handle_request(req)?;
+        let response = self.http_handler.handle_request(req).await?;
 
         if response.status_code != 204 {
             return Err(Error::UnexpectedStatusCode(response.status_code));

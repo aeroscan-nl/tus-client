@@ -39,7 +39,7 @@ pub struct HttpResponse {
 
 /// The required trait used by `tus_client::Client` to represent a handler to execute `HttpRequest`s.
 pub trait HttpHandler {
-    fn handle_request(&self, req: HttpRequest) -> Result<HttpResponse, Error>;
+    async fn handle_request<'a>(&self, req: HttpRequest<'a>) -> Result<HttpResponse, Error>;
 }
 
 /// Returns the default headers required to make requests to an tus enabled endpoint.

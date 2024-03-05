@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 impl HttpHandler for reqwest::Client {
-    fn handle_request(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
+    async fn handle_request(&self, req: HttpRequest) -> Result<HttpResponse, Error> {
         let mut headers = HeaderMap::new();
         for (key, value) in req.headers {
             headers.insert(HeaderName::from_str(&key).unwrap(), value.parse().unwrap());
