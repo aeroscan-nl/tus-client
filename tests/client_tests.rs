@@ -1,8 +1,11 @@
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use futures::io::Cursor;
+use futures::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::Write;
-use std::task::{Poll, Waker};
-use tempfile::NamedTempFile;
+use std::io::SeekFrom;
+use std::task::Poll;
 use tus_client;
 use tus_client::http::{HttpHandler, HttpMethod, HttpRequest, HttpResponse};
 use tus_client::{Error, TusExtension};
@@ -55,7 +58,7 @@ impl HttpHandler for TestHandler {
                 headers.insert("upload-offset".to_owned(), self.upload_progress.to_string());
                 headers.insert(
                     "upload-metadata".to_owned(),
-                    base64::encode("key_one:value_one;key_two:value_two;k"),
+                    STANDARD.encode("key_one:value_one;key_two:value_two;k"),
                 );
 
                 Ok(HttpResponse {
@@ -113,18 +116,13 @@ impl HttpHandler for TestHandler {
                     headers,
                 })
             }
-            _ => unreachable!(),
         }
     }
 }
 
-fn create_temp_file() -> NamedTempFile {
-    let mut temp_file = NamedTempFile::new().unwrap();
+fn create_temp_file() -> impl AsyncRead + AsyncSeek + Unpin {
     let buffer: Vec<u8> = (0..(1024 * 763)).map(|_| rand::random::<u8>()).collect();
-    for _ in 0..20 {
-        temp_file.write_all(&buffer[..]).unwrap();
-    }
-    temp_file
+    Cursor::new(buffer)
 }
 
 #[test]
@@ -187,36 +185,36 @@ fn should_return_server_info() {
 
 #[test]
 fn should_upload_file() {
-    let temp_file = create_temp_file();
+    let mut temp_file = create_temp_file();
 
     let client = tus_client::Client::new(TestHandler {
         upload_progress: 0,
-        total_upload_size: temp_file.as_file().metadata().unwrap().len() as usize,
+        total_upload_size: unwrap_future(temp_file.seek(SeekFrom::End(0))).unwrap() as usize,
         status_code: 204,
         ..TestHandler::default()
     });
 
-    unwrap_future(client.upload("/something", temp_file.path())).expect("'upload' call failed");
+    unwrap_future(client.upload("/something", temp_file)).expect("'upload' call failed");
 }
 
 #[test]
 fn should_upload_file_with_custom_chunk_size() {
-    let temp_file = create_temp_file();
+    let mut temp_file = create_temp_file();
 
     let client = tus_client::Client::new(TestHandler {
         upload_progress: 0,
-        total_upload_size: temp_file.as_file().metadata().unwrap().len() as usize,
+        total_upload_size: unwrap_future(temp_file.seek(SeekFrom::End(0))).unwrap() as usize,
         status_code: 204,
         ..TestHandler::default()
     });
 
-    unwrap_future(client.upload_with_chunk_size("/something", temp_file.path(), 9 * 87 * 65 * 43))
+    unwrap_future(client.upload_with_chunk_size("/something", temp_file, 9 * 87 * 65 * 43))
         .expect("'upload_with_chunk_size' call failed");
 }
 
 #[test]
 fn should_receive_upload_path() {
-    let temp_file = create_temp_file();
+    let mut temp_file = create_temp_file();
 
     let client = tus_client::Client::new(TestHandler {
         status_code: 201,
@@ -227,15 +225,18 @@ fn should_receive_upload_path() {
     metadata.insert("key_one".to_owned(), "value_one".to_owned());
     metadata.insert("key_two".to_owned(), "value_two".to_owned());
 
-    let result = unwrap_future(client.create("/something", temp_file.path()))
-        .expect("'create_with_metadata' call failed");
+    let result = unwrap_future(client.create(
+        "/something",
+        unwrap_future(temp_file.seek(SeekFrom::End(0))).unwrap() as usize,
+    ))
+    .expect("'create_with_metadata' call failed");
 
     assert!(!result.is_empty());
 }
 
 #[test]
 fn should_receive_upload_path_with_metadata() {
-    let temp_file = create_temp_file();
+    let mut temp_file = create_temp_file();
 
     let client = tus_client::Client::new(TestHandler {
         status_code: 201,
@@ -246,9 +247,12 @@ fn should_receive_upload_path_with_metadata() {
     metadata.insert("key_one".to_owned(), "value_one".to_owned());
     metadata.insert("key_two".to_owned(), "value_two".to_owned());
 
-    let result =
-        unwrap_future(client.create_with_metadata("/something", temp_file.path(), metadata))
-            .expect("'create_with_metadata' call failed");
+    let result = unwrap_future(client.create_with_metadata(
+        "/something",
+        unwrap_future(temp_file.seek(SeekFrom::End(0))).unwrap() as usize,
+        metadata,
+    ))
+    .expect("'create_with_metadata' call failed");
 
     assert!(!result.is_empty());
 }

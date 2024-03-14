@@ -39,6 +39,7 @@ pub struct HttpResponse {
 
 /// The required trait used by `tus_client::Client` to represent a handler to execute `HttpRequest`s.
 pub trait HttpHandler {
+    #[allow(async_fn_in_trait)]
     async fn handle_request<'a>(&self, req: HttpRequest<'a>) -> Result<HttpResponse, Error>;
 }
 

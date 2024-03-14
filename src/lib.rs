@@ -45,14 +45,15 @@
 //! `upload` (and `upload_with_chunk_size`) will automatically resume the upload from where it left off, if the upload transfer is interrupted.
 #![doc(html_root_url = "https://docs.rs/tus_client/0.1.1")]
 use crate::http::{default_headers, Headers, HttpHandler, HttpMethod, HttpRequest};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt::{Display, Formatter};
-use std::fs::File;
 use std::io;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::SeekFrom;
 use std::num::ParseIntError;
-use std::path::Path;
 use std::str::FromStr;
 
 mod headers;
@@ -105,7 +106,7 @@ where
         let metadata = response
             .headers
             .get_by_key(headers::UPLOAD_METADATA)
-            .and_then(|data| base64::decode(data).ok())
+            .and_then(|data| STANDARD.decode(data).ok())
             .map(|decoded| {
                 String::from_utf8(decoded).unwrap().split(';').fold(
                     HashMap::new(),
@@ -136,21 +137,26 @@ where
     }
 
     /// Upload a file to the specified upload URL.
-    pub async fn upload(&self, url: &str, path: &Path) -> Result<(), Error> {
-        self.upload_with_chunk_size(url, path, DEFAULT_CHUNK_SIZE)
+    pub async fn upload<R>(&self, url: &str, reader: R) -> Result<(), Error>
+    where
+        R: AsyncRead + AsyncSeek + Unpin,
+    {
+        self.upload_with_chunk_size(url, reader, DEFAULT_CHUNK_SIZE)
             .await
     }
 
     /// Upload a file to the specified upload URL with the given chunk size.
-    pub async fn upload_with_chunk_size(
+    pub async fn upload_with_chunk_size<R>(
         &self,
         url: &str,
-        path: &Path,
+        mut reader: R,
         chunk_size: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        R: AsyncRead + AsyncSeek + Unpin,
+    {
         let info = self.get_info(url).await?;
-        let file = File::open(path)?;
-        let file_len = file.metadata()?.len();
+        let file_len = reader.seek(SeekFrom::End(0)).await? as usize;
 
         if let Some(total_size) = info.total_size {
             if file_len as usize != total_size {
@@ -158,18 +164,27 @@ where
             }
         }
 
-        let mut reader = BufReader::new(&file);
         let mut buffer = vec![0; chunk_size];
         let mut progress = info.bytes_uploaded;
 
-        reader.seek(SeekFrom::Start(progress as u64))?;
-
         loop {
-            let bytes_read = reader.read(&mut buffer)?;
+            reader.seek(SeekFrom::Start(progress as u64)).await?;
+
+            // fill the chunk buffer until the end of the file is reached or the buffer is filled
+            let mut bytes_read = 0;
+            while bytes_read < buffer.len() {
+                let read = reader.read(&mut buffer[bytes_read..]).await?;
+                if read == 0 {
+                    break;
+                }
+                bytes_read += read;
+            }
+
             if bytes_read == 0 {
                 return Err(Error::FileReadError);
             }
 
+            // create a request with the chunk buffer and upload it
             let req = self.create_request(
                 HttpMethod::Patch,
                 url,
@@ -199,11 +214,9 @@ where
             progress = upload_offset.parse()?;
 
             if progress >= file_len as usize {
-                break;
+                return Ok(());
             }
         }
-
-        Ok(())
     }
 
     /// Get information about the tus server
@@ -246,26 +259,23 @@ where
     }
 
     /// Create a file on the server, receiving the upload URL of the file.
-    pub async fn create(&self, url: &str, path: &Path) -> Result<String, Error> {
-        self.create_with_metadata(url, path, HashMap::new()).await
+    pub async fn create(&self, url: &str, len: usize) -> Result<String, Error> {
+        self.create_with_metadata(url, len, HashMap::new()).await
     }
 
     /// Create a file on the server including the specified metadata, receiving the upload URL of the file.
     pub async fn create_with_metadata(
         &self,
         url: &str,
-        path: &Path,
+        len: usize,
         metadata: HashMap<String, String>,
     ) -> Result<String, Error> {
         let mut headers = default_headers();
-        headers.insert(
-            headers::UPLOAD_LENGTH.to_owned(),
-            path.metadata()?.len().to_string(),
-        );
+        headers.insert(headers::UPLOAD_LENGTH.to_owned(), len.to_string());
         if !metadata.is_empty() {
             let data = metadata
                 .iter()
-                .map(|(key, value)| format!("{} {}", key, base64::encode(value)))
+                .map(|(key, value)| format!("{} {}", key, STANDARD.encode(value)))
                 .collect::<Vec<_>>()
                 .join(",");
             headers.insert(headers::UPLOAD_METADATA.to_owned(), data);
